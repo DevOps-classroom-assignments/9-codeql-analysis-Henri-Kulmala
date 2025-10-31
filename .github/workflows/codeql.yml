@@ -1,21 +1,84 @@
-name: CodeQL + Docker CI
+name: CodeQL and Docker CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "**" ]
   pull_request:
-    branches: [ main ]
+    branches: [ "**" ]
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
-  analyze:
-    # Use ubuntu-latest for the analysis job
-    # Define permissions for the job
-    # Define language to be analyzed
-    name: CodeQL Analysis
-
-  docker:
-    name: Docker Build & Run
+  codeql:
+    name: CodeQL (Go)
     runs-on: ubuntu-latest
-    needs: analyze
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    # Define steps to build and run the Docker container
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: go
+          queries: security-extended 
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:go"
+
+  build-and-smoke:
+    name: Docker build & smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: |
+          docker build -t go-web-server .
+
+      - name: Run container
+        run: |
+          docker run -d --rm -p 8080:8080 --name go-web go-web-server
+          # odota hetki että palvelin käynnistyy
+          for i in {1..20}; do
+            if curl -fsS "http://127.0.0.1:8080/readfile?file=hello.txt" >/dev/null 2>&1; then
+              echo "Service is up."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Service did not start in time." >&2
+          docker logs go-web || true
+          exit 1
+
+      - name: Smoke test /readfile
+        run: |
+          set -e
+          resp="$(curl -fsS "http://127.0.0.1:8080/readfile?file=hello.txt")"
+          echo "Response: $resp"
+          test -n "$resp" # varmista että ei ole tyhjä
+
+      - name: (Optional) Print traversal attempt (must not fail workflow)
+        continue-on-error: true
+        run: |
+          echo "Attempting traversal (this step is informational only):"
+          curl -sS "http://127.0.0.1:8080/readfile?file=../main.go" || true
+
+      - name: Stop container
+        if: always()
+        run: docker stop go-web || true
